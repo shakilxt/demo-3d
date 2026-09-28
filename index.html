@@ -8,8 +8,11 @@
 <style>
   :root {
     --bg: #f5f6f8;
-    --grid: #dfe2e8;
-    --dot: #b8bdc6;
+    --globe-line: #5b7fd1;
+    --globe-node: #3e66c6;
+    --globe-orbit: #6f8cc9;
+    --globe-fill: #dbe4f6;
+    --globe-glow: #c3d3f2;
     --marker: #e3342f;
     --arc: #f490a6;
     --runner: #ff1a1a;
@@ -17,8 +20,11 @@
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f1115;
-      --grid: #262a33;
-      --dot: #4a505c;
+      --globe-line: #6f9cf0;
+      --globe-node: #a9c6ff;
+      --globe-orbit: #eef3ff;
+      --globe-fill: #173064;
+      --globe-glow: #2a57b0;
       --marker: #ff4b45;
       --arc: #ff7f9b;
       --runner: #ff3b3b;
@@ -41,7 +47,7 @@
 </style>
 </head>
 <body>
-<canvas id="globe" aria-label="Rotating wireframe globe showing a travel route" role="img"></canvas>
+<canvas id="globe" aria-label="Rotating network globe showing a travel route" role="img"></canvas>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -68,9 +74,16 @@
   const SPIN_SPEED = 0.06;     // rad per second
   const TILT_X = 0.38;         // forward
   const TILT_Z = -0.12;        // sideways
-  const GRID_STEP = 20;        // degrees
-  const DOT_COUNT = 700;
+  const LAND_LATTICE = 14000;  // lattice size for land nodes (~2300 kept)
+  const OCEAN_LATTICE = 700;   // lattice size for ocean nodes (~270 kept)
+  const LAND_DUST = 1800;      // unlinked specks inside the continents
+  const NEIGHBOURS = 4;        // links per node
+  const MAX_EDGE = 0.42;       // longest link (chord, globe radius = 1)
+  const STAR_CHANCE = 0.018;   // share of land nodes drawn as twinkling highlights
+  const DOT_COUNT = 700;       // faint dust over the surface
   const DOT_SIZE = 1.6;        // px
+  const ORBIT_COUNT = 26;      // dots floating around the globe
+  const ORBIT_SPEED = 0.02;    // rad per second
 
   // Markers and arcs (globe radius = 1)
   const MARKER_SIZE = 0.028;   // world units (viewport height = 2 units)
@@ -108,86 +121,293 @@
     );
   }
 
-  // Fades geometry smoothly as it turns to the far side of the globe.
-  const facingVertex = `
-    uniform float uSize;
+  // --- Land mask -------------------------------------------------------------
+  // 240 x 120 bitmap (1.5 degree cells, row 0 at the north pole, column 0 at
+  // lon -180), rasterised from Natural Earth 1:50m land. 1 bit per cell.
+  const LAND_W = 240;
+  const LAND_H = 120;
+  const LAND_MASK = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADofwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPj/n////2MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/++f///x8AACABgGkAAOABAAAAAAAAAAAAAAAAWPw//v///wMAAD8AAAAAAAA4AAAAAAAAAAAAAAAHAMAB/P///w8AAAwAAAAAAAgwAAAAAAAAAAAAAAC8cxgDAP7//wcAAAAAAIAHAMD/DwD0AAAAAAAAAOACAAAAAPz//wcAAAAAAGAAAPz/AQAAAAAAAAAAAOA/Y7UDAPD/vwEAAAAAABjAwP//9z9AAAAAA4AAAED8A2P/AeD/fwMAAAAAABDg9v///z//HwCAAPj/A0/8X4PkB9j//wAAAPA/AADj/v///////wc9A/7///8Hwp6hB8D/DwAAAPj/Y+z//f//////////N/D///////+Bf+D/AQAAAP6/x/+//v//////////GP7//////7/wJ+AfAH4AAD5++P//////////////AOD//////8sCH8AfAAwAwL////////////////9/APz//////wNxDIAPAAAI8M////////////////8fAPjf/////wHwAwAOAAAA+M///////////////+ADAPAB+P///wHwMwAAAAAA+A////////////9/YhgAAIAC4P///wPgfwAAAAAQABf///////////8fAB4AACAAAP///x/ofwAAAAAwYMb///////////8PAB8AAAQAgP7////5/wEAAABMwOD///////////8DAA8AAAAAAPz////5/wcAAADs8P////////////8/AAcAAAAAAPj////7/wMAAADi+f////////////+/AAEAAAAAAPj/////jwAAAAAw/v////////////+/gAAAAAAAAOD/////Gw4AAACA//////////////8fAAAAAAAAAOD/////HxAAAACA//////////////8fAAAAAAAAAOD/////PwAAAACA//9P/vj///////8PAAAAAAAAAOD/////EwAAAACA//wHfPz////////HAAAAAAAAAOD/////AQAAAAD8g/EH8Pj////////gAAAAAAAAAOD///9/AAAAAAD8Aebn+fH//////z8AAAAAAAAAAOD///9/AAAAAAD8AGD+//H//////xpgAAAAAAAAAMD///8/AAAAAAD8AMT8//H/////fzggAAAAAAAAAID///8fAAAAAAAQdADs//v//////zE4AAAAAAAAAID///8fAAAAAACwfwBD/////////zA/AAAAAAAAAAD+//8HAAAAAAD4fwAA/////////0AHAAAAAAAAAAD8//8DAAAAAAD8/2OA/////////4EAAAAAAAAAAADo//8DAAAAAAD+/+///////////wEAAAAAAAAAAAD4/xkCAAAAAAD+//////z//////wEAAAAAAAAAAADYfwACAAAAAID///8///n//////wAAAAAAAAAAAACgfwAGAAAAAMD///9//8H//////wAAAAAAAAAAAAAgfwAAAAAAAMD///9//jPg////fwAAAAAAAAAAAAAAfgAAAAAAAOD//////H/A////PwEAAAAAAAAAAAAAfAAIAAAAAOD//////f/A/+//BwAAAAAAAAAAAAAAfDBwAAAAAOD/////+X8A/sN/AAAAAAAAAAAAAAAA+DgAAwAAAOD/////+T8A/oA/AwAAAAAAAAAAAAAA4B8AAAAAAOD/////8x8AfoB/AAMAAAAAAAAAAAAAgPwAAAAAAOD/////8wcAPgD+AAEAAAAAAAAAAAAAAPgBAAAAAOD/////7wEAHAD+AQEAAAAAAAAAAAAAAMAAAAAAAOD/////PwAAHAD8AQAAAAAAAAAAAAAAAICAAgAAAOD/////HwMAGADgAQ4AAAAAAAAAAAAAAADBfgAAAID//////wMAOABAAAAAAAAAAAAAAAAAAADy/wAAAID//////wEAKAAEAAwAAAAAAAAAAAAAAADw/wEAAAD//////wEAYAAIAAgAAAAAAAAAAAAAAADw/x8AAAB88P///wAAAIAZ4AAAAAAAAAAAAAAAAADg/z8AAAAAwP///wAAAAAbMAAAAAAAAAAAAAAAAADw/z8AAAAAgP//PwAAAAAWfCAAAAAAAAAAAAAAAAD4/z8AAAAAwP//HwAAAAAMficAAAAAAAAAAAAAAAD8//8BAAAAwP//DwAAAAAYPiAFAAAAAAAAAAAAAAD8//8DAAAAwP//BwAAAAA8vgEZAAAAAAAAAAAAAAD8//8/AAAAgP//BwAAAABwMBL+AAAAAAAAAAAAAAD8////AAAAAP//BwAAAABgAADwAQAAAAAAAAAAAAD4////AQAAAP//AwAAAADAAADiAwAAAAAAAAAAAAD4////AQAAAP7/AwAAAAAAHATwBgAAAAAAAAAAAADw////AAAAAP7/AwAAAAAAAAQADAAAAAAAAAAAAADw//9/AAAAAP7/BwAAAAAAAIAAAAAAAAAAAAAAAADg//9/AAAAAP7/BwAAAAAAAICHAAAAAAAAAAAAAADg//8/AAAAAP//BwEAAAAAANDHAAAAAAAAAAAAAADA//8/AAAAAP//hwMAAAAAAPjHAQAAAAAAAAAAAAAA//8/AAAAAP//4QEAAAAAAP7fAQAAAAAAAAAAAAAA/v8/AAAAAP//4AEAAAAAAP7/AwAAAAAAAAAAAAAA/v8fAAAAAP5/wEAAAAAAgP//BwAAAAAAAAAAAAAA/v8fAAAAAP7/4AAAAAAA4P//D0AAAAAAAAAAAAAA/v8DAAAAAPz/4AAAAAAA8P//HwAAAAAAAAAAAAAA/v8AAAAAAPx/YAAAAAAA8P//PwAAAAAAAAAAAAAA/v8AAAAAAPw/AAAAAAAA+P//PwAAAAAAAAAAAAAA/v8AAAAAAPw/AAAAAAAA8P//PwAAAAAAAAAAAAAA/38AAAAAAPgfAAAAAAAA4P//PwAAAAAAAAAAAAAA/z8AAAAAAPAPAAAAAAAA4P//PwAAAAAAAAAAAAAA/x8AAAAAAPAHAAAAAAAA4B/+PwAAAAAAAAAAAAAA/w8AAAAAAPABAAAAAAAA4AP0HwAAAAAAAAAAAAAA/wMAAAAAAAAAAAAAAAAAAADwDwAIAAAAAAAAAACA/wMAAAAAAAAAAAAAAAAAAADgDwAQAAAAAAAAAACA/wEAAAAAAAAAAAAAAAAAAADAAgBwAAAAAAAAAACAfwAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAACAHwAAAAAAAAAAAAAAAAAAAAAABwAQAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAABgAMAAAAAAAAAACADwAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAAACABwAAAAAAAAAAAAAAAAAAAAAAAIADAAAAAAAAAADADwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADABwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAwEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAD0AAPD/Htw/AAAAAAAAAAAAAAAAGAAAAAAAAAAA8P9/4P//////AwAAAAAAAAAAAAAAPwAAAAAAAADA/f8/+P///////wcAAAAAAAAAAAAAewAAAAAK//////8///////////8AAAAAAAAACAAA+AAAAMD///////////////////8BAAAAAEAo8P//fwAAAMD//////////////////z8AAAAA////////HwAAAP///////////////////w8AAICB//////8fAAAA/P///////////////////x8AAAj///////8MBMAD/////////////////////x8AAADw//////8fgPAD8P///////////////////wMAAAD+////////DwDw/////////////////////w8AwIP/////////f/7///////////////////////8A/8D/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////';
+  const landBits = Uint8Array.from(atob(LAND_MASK), (c) => c.charCodeAt(0));
+  function isLand(lat, lon) {
+    const x = ((Math.floor(((lon + 180) / 360) * LAND_W) % LAND_W) + LAND_W) % LAND_W;
+    const y = Math.min(LAND_H - 1, Math.max(0, Math.floor(((90 - lat) / 180) * LAND_H)));
+    const i = y * LAND_W + x;
+    return (landBits[i >> 3] >> (i & 7)) & 1;
+  }
+  function isCoast(lat, lon) {
+    const d = 180 / LAND_H;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (!isLand(lat + dy * d, lon + dx * d)) return true;
+      }
+    }
+    return false;
+  }
+
+  // Seeded random, so the network looks the same on every load.
+  let seed = 20240917;
+  function rand() {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // --- Shaders ---------------------------------------------------------------
+  // Everything on the globe fades smoothly as it turns to the far side.
+  const FACING = `
     varying float vFacing;
-    void main() {
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      vec3 n = normalize(normalMatrix * position);
-      vFacing = dot(n, normalize(-mv.xyz));
-      gl_Position = projectionMatrix * mv;
-      gl_PointSize = uSize;
+    float facing(vec4 mv) {
+      return dot(normalize(normalMatrix * position), normalize(-mv.xyz));
     }`;
-  const facingFragment = `
-    uniform vec3 uColor;
-    uniform float uOpacity;
+  const FADE = `
     uniform float uBack;
     varying float vFacing;
-    void main() {
-      float a = mix(uBack, 1.0, smoothstep(-0.12, 0.2, vFacing));
-      gl_FragColor = vec4(uColor, a * uOpacity);
-    }`;
-  function facingMaterial(opacity, back) {
+    float fade() { return mix(uBack, 1.0, smoothstep(-0.12, 0.2, vFacing)); }`;
+
+  function lineMaterial(back) {
     return new THREE.ShaderMaterial({
-      uniforms: {
-        uColor: { value: new THREE.Color() },
-        uOpacity: { value: opacity },
-        uBack: { value: back },
-        uSize: { value: 1 },
-      },
-      vertexShader: facingVertex,
-      fragmentShader: facingFragment,
+      uniforms: { uColor: { value: new THREE.Color() }, uBack: { value: back } },
+      vertexShader: `
+        attribute float aAlpha;
+        varying float vAlpha;
+        ${FACING}
+        void main() {
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vFacing = facing(mv);
+          vAlpha = aAlpha;
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: `
+        uniform vec3 uColor;
+        varying float vAlpha;
+        ${FADE}
+        void main() { gl_FragColor = vec4(uColor, vAlpha * fade()); }`,
       transparent: true,
       depthWrite: false,
     });
   }
 
-  // --- Wireframe grid --------------------------------------------------------
-  const gridMat = facingMaterial(1, 0.45);
-  {
-    const pos = [];
-    const seg = 128;
-    const a = new THREE.Vector3(), b = new THREE.Vector3();
-    const push = (p, q) => pos.push(p.x, p.y, p.z, q.x, q.y, q.z);
-    for (let lat = -90 + GRID_STEP; lat < 90; lat += GRID_STEP) {
-      for (let i = 0; i < seg; i++) {
-        latLonToVec(lat, -180 + (360 * i) / seg, 1, a);
-        latLonToVec(lat, -180 + (360 * (i + 1)) / seg, 1, b);
-        push(a, b);
-      }
-    }
-    for (let lon = -180; lon < 180; lon += GRID_STEP) {
-      for (let i = 0; i < seg; i++) {
-        latLonToVec(-90 + (180 * i) / seg, lon, 1, a);
-        latLonToVec(-90 + (180 * (i + 1)) / seg, lon, 1, b);
-        push(a, b);
-      }
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    const grid = new THREE.LineSegments(geo, gridMat);
-    grid.renderOrder = 0;
-    spin.add(grid);
+  // Round points. aGlow > 0 adds a soft halo and a gentle twinkle.
+  function pointMaterial(back) {
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color() },
+        uBack: { value: back },
+        uPixelRatio: { value: 1 },
+        uTime: { value: 0 },
+      },
+      vertexShader: `
+        attribute float aSize;
+        attribute float aAlpha;
+        attribute float aGlow;
+        attribute float aPhase;
+        uniform float uPixelRatio;
+        uniform float uTime;
+        varying float vAlpha;
+        varying float vGlow;
+        ${FACING}
+        void main() {
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vFacing = facing(mv);
+          float tw = 0.75 + 0.25 * sin(uTime * 1.6 + aPhase);
+          vAlpha = aAlpha * mix(1.0, tw, aGlow);
+          vGlow = aGlow;
+          gl_Position = projectionMatrix * mv;
+          gl_PointSize = aSize * uPixelRatio * mix(1.0, tw, aGlow);
+        }`,
+      fragmentShader: `
+        uniform vec3 uColor;
+        varying float vAlpha;
+        varying float vGlow;
+        ${FADE}
+        void main() {
+          float r = length(gl_PointCoord - 0.5) * 2.0;
+          float core = 1.0 - smoothstep(mix(0.6, 0.18, vGlow), mix(1.0, 0.3, vGlow), r);
+          float halo = pow(1.0 - clamp(r, 0.0, 1.0), 2.0) * 0.55 * vGlow;
+          float a = max(core, halo) * vAlpha * fade();
+          if (a < 0.003) discard;
+          gl_FragColor = vec4(uColor, a);
+        }`,
+      transparent: true,
+      depthWrite: false,
+    });
   }
 
-  // --- Scattered dots --------------------------------------------------------
-  const dotMat = facingMaterial(0.9, 0.35);
-  {
-    const pos = new Float32Array(DOT_COUNT * 3);
-    for (let i = 0; i < DOT_COUNT; i++) {
-      const y = Math.random() * 2 - 1;
-      const a = Math.random() * Math.PI * 2;
-      const r = Math.sqrt(1 - y * y);
-      pos[i * 3] = r * Math.cos(a);
-      pos[i * 3 + 1] = y;
-      pos[i * 3 + 2] = r * Math.sin(a);
-    }
+  function pointsObject(list, material) {
+    const n = list.length;
+    const pos = new Float32Array(n * 3);
+    const size = new Float32Array(n), alpha = new Float32Array(n);
+    const glow = new Float32Array(n), phase = new Float32Array(n);
+    list.forEach((p, i) => {
+      pos.set([p.v.x, p.v.y, p.v.z], i * 3);
+      size[i] = p.size;
+      alpha[i] = p.alpha;
+      glow[i] = p.glow || 0;
+      phase[i] = rand() * Math.PI * 2;
+    });
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const dots = new THREE.Points(geo, dotMat);
-    dots.renderOrder = 1;
-    spin.add(dots);
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aAlpha', new THREE.BufferAttribute(alpha, 1));
+    geo.setAttribute('aGlow', new THREE.BufferAttribute(glow, 1));
+    geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+    return new THREE.Points(geo, material);
+  }
+
+  // --- Atmosphere: soft fill, brighter rim and an outer halo -----------------
+  const fillMat = new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color() }, uFill: { value: 0.35 }, uRim: { value: 0.6 } },
+    vertexShader: `
+      varying float vRim;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vRim = 1.0 - max(dot(normalize(normalMatrix * normal), normalize(-mv.xyz)), 0.0);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uFill;
+      uniform float uRim;
+      varying float vRim;
+      void main() { gl_FragColor = vec4(uColor, uFill + pow(vRim, 3.0) * uRim); }`,
+    transparent: true,
+    depthWrite: false,
+  });
+  const fill = new THREE.Mesh(new THREE.SphereGeometry(0.995, 96, 64), fillMat);
+  fill.renderOrder = -1;
+  tilt.add(fill);
+
+  const haloMat = new THREE.SpriteMaterial({ transparent: true, depthWrite: false, depthTest: false });
+  {
+    const c = document.createElement('canvas');
+    c.width = c.height = 256;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+    grad.addColorStop(0, 'rgba(255,255,255,0)');
+    grad.addColorStop(0.7, 'rgba(255,255,255,0)');
+    grad.addColorStop(0.76, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(0.84, 'rgba(255,255,255,0.18)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 256, 256);
+    haloMat.map = new THREE.CanvasTexture(c);
+  }
+  const halo = new THREE.Sprite(haloMat);
+  halo.scale.set(2.64, 2.64, 1);
+  halo.renderOrder = -2;
+  tilt.add(halo);
+
+  // --- Network nodes ---------------------------------------------------------
+  // Dense on land, sparse over the oceans, spaced on a jittered Fibonacci
+  // lattice so continents read clearly without looking gridded.
+  const nodes = [];
+  function fibonacci(count, keep) {
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    const jitter = 1.1 * Math.sqrt(4 / count);
+    for (let i = 0; i < count; i++) {
+      const y = 1 - ((i + 0.5) / count) * 2;
+      const r = Math.sqrt(1 - y * y);
+      const v = new THREE.Vector3(Math.cos(golden * i) * r, y, Math.sin(golden * i) * r);
+      v.x += (rand() - 0.5) * jitter;
+      v.y += (rand() - 0.5) * jitter;
+      v.z += (rand() - 0.5) * jitter;
+      v.normalize();
+      const lat = 90 - Math.acos(v.y) / D2R;
+      const lon = Math.atan2(v.z, -v.x) / D2R - 180;
+      const land = isLand(lat, lon);
+      if (keep(land)) nodes.push({ v, land, coast: land && isCoast(lat, lon) });
+    }
+  }
+  fibonacci(LAND_LATTICE, (land) => land && rand() < 0.62);
+  fibonacci(OCEAN_LATTICE, (land) => !land && rand() < 0.55);
+
+  // Connect every node to its nearest neighbours. Dense land gives small
+  // triangles, sparse ocean gives the large low-poly facets.
+  const edgePos = [];
+  const edgeAlpha = [];
+  {
+    const seen = new Set();
+    const n = nodes.length;
+    const best = [];
+    for (let i = 0; i < n; i++) {
+      const a = nodes[i];
+      best.length = 0;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const d = a.v.distanceToSquared(nodes[j].v);
+        if (d > MAX_EDGE * MAX_EDGE) continue;
+        if (best.length < NEIGHBOURS) best.push([d, j]);
+        else if (d < best[NEIGHBOURS - 1][0]) best[NEIGHBOURS - 1] = [d, j];
+        else continue;
+        best.sort((p, q) => p[0] - q[0]);
+      }
+      for (const [, j] of best) {
+        const key = i < j ? i * n + j : j * n + i;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const b = nodes[j];
+        const alpha = a.coast && b.coast ? 0.6 : a.land && b.land ? 0.24 : 0.14;
+        edgePos.push(a.v.x, a.v.y, a.v.z, b.v.x, b.v.y, b.v.z);
+        edgeAlpha.push(alpha, alpha);
+      }
+    }
+  }
+  const edgeMat = lineMaterial(0.2);
+  {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(edgePos, 3));
+    geo.setAttribute('aAlpha', new THREE.Float32BufferAttribute(edgeAlpha, 1));
+    const edges = new THREE.LineSegments(geo, edgeMat);
+    edges.renderOrder = 0;
+    spin.add(edges);
+  }
+
+  // Node sizes: coast brighter, a few twinkling highlights, ocean faint.
+  const nodeMat = pointMaterial(0.22);
+  {
+    const list = nodes.map((p) => {
+      if (p.land && rand() < STAR_CHANCE) return { v: p.v, size: 16 + rand() * 10, alpha: 1, glow: 1 };
+      if (p.coast) return { v: p.v, size: 2.8 + rand() * 1.4, alpha: 1 };
+      if (p.land) return { v: p.v, size: 2 + rand() * 1.8, alpha: 0.85 };
+      return { v: p.v, size: 2 + rand() * 1.4, alpha: 0.6 };
+    });
+    // Unlinked specks that thicken the continents.
+    for (let placed = 0, tries = 0; placed < LAND_DUST && tries < LAND_DUST * 20; tries++) {
+      const lat = Math.asin(rand() * 2 - 1) / D2R;
+      const lon = rand() * 360 - 180;
+      if (!isLand(lat, lon)) continue;
+      list.push({ v: latLonToVec(lat, lon, 1), size: 1.2 + rand() * 1.2, alpha: 0.35 + rand() * 0.35 });
+      placed++;
+    }
+    // Fine dust scattered over the whole surface.
+    for (let i = 0; i < DOT_COUNT; i++) {
+      const y = rand() * 2 - 1;
+      const a = rand() * Math.PI * 2;
+      const r = Math.sqrt(1 - y * y);
+      list.push({ v: new THREE.Vector3(r * Math.cos(a), y, r * Math.sin(a)), size: DOT_SIZE, alpha: 0.4 });
+    }
+    const pts = pointsObject(list, nodeMat);
+    pts.renderOrder = 1;
+    spin.add(pts);
+  }
+
+  // --- Orbiting dots ---------------------------------------------------------
+  // A loose ring of dots floating just outside the silhouette.
+  const orbit = new THREE.Group();
+  scene.add(orbit);
+  const orbitMat = pointMaterial(1);
+  {
+    const list = [];
+    for (let i = 0; i < ORBIT_COUNT; i++) {
+      const a = (i / ORBIT_COUNT) * Math.PI * 2 + (rand() - 0.5) * 0.35;
+      const r = 1.08 + rand() * 0.2;
+      const v = new THREE.Vector3(Math.cos(a) * r, Math.sin(a) * r, (rand() - 0.5) * 0.3);
+      list.push({ v, size: 3 + rand() * 1.8, alpha: 0.9 });
+    }
+    const pts = pointsObject(list, orbitMat);
+    pts.renderOrder = 5;
+    orbit.add(pts);
   }
 
   // --- Arcs ------------------------------------------------------------------
@@ -213,11 +433,13 @@
     return out.multiplyScalar(MARKER_ALT + lift * Math.sin(Math.PI * t));
   }
 
-  const arcMat = facingMaterial(0.55, 0.35);
+  const arcMat = lineMaterial(0.35);
   legs.forEach((_, i) => {
     const pts = [];
     for (let k = 0; k <= ARC_SAMPLES; k++) pts.push(arcPoint(i, k / ARC_SAMPLES, new THREE.Vector3()));
-    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), arcMat);
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    geo.setAttribute('aAlpha', new THREE.Float32BufferAttribute(new Array(pts.length).fill(0.6), 1));
+    const line = new THREE.Line(geo, arcMat);
     line.renderOrder = 2;
     spin.add(line);
   });
@@ -250,8 +472,11 @@
   function applyTheme() {
     const cs = getComputedStyle(document.documentElement);
     const color = (name) => new THREE.Color(cs.getPropertyValue(name).trim());
-    gridMat.uniforms.uColor.value.copy(color('--grid'));
-    dotMat.uniforms.uColor.value.copy(color('--dot'));
+    edgeMat.uniforms.uColor.value.copy(color('--globe-line'));
+    nodeMat.uniforms.uColor.value.copy(color('--globe-node'));
+    orbitMat.uniforms.uColor.value.copy(color('--globe-orbit'));
+    fillMat.uniforms.uColor.value.copy(color('--globe-fill'));
+    haloMat.color.copy(color('--globe-glow'));
     arcMat.uniforms.uColor.value.copy(color('--arc'));
     runnerMat.color.copy(color('--runner'));
     const marker = color('--marker');
@@ -267,7 +492,8 @@
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    dotMat.uniforms.uSize.value = DOT_SIZE * pr;
+    nodeMat.uniforms.uPixelRatio.value = pr;
+    orbitMat.uniforms.uPixelRatio.value = pr;
 
     // Visible area at the globe's centre plane is 2 units tall.
     const visH = 2;
@@ -278,6 +504,8 @@
     const cy = Math.min(visH * 0.32 - r, -visH / 2 + r * 0.75);
     tilt.scale.setScalar(r);
     tilt.position.set(0, cy, 0);
+    orbit.scale.setScalar(r);
+    orbit.position.copy(tilt.position);
     const ms = MARKER_SIZE / r;
     markers.forEach((m) => m.scale.set(ms, ms, 1));
   }
@@ -376,6 +604,8 @@
     const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
     spin.rotation.y += SPIN_SPEED * dt;
+    orbit.rotation.z += ORBIT_SPEED * dt;
+    nodeMat.uniforms.uTime.value = now / 1000;
     progress += SPEED * dt;
     if (progress > travel) progress -= travel;
     render();
